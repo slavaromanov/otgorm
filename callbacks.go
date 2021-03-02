@@ -2,20 +2,24 @@ package otgorm
 
 import (
 	"context"
+	"database/sql/driver"
 	"fmt"
-
-	"google.golang.org/grpc/codes"
-
 	"github.com/jinzhu/gorm"
-	"go.opentelemetry.io/otel/api/core"
-	"go.opentelemetry.io/otel/api/global"
-	"go.opentelemetry.io/otel/api/trace"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/label"
+	"go.opentelemetry.io/otel/trace"
+	"reflect"
+	"regexp"
+	"runtime"
+	"time"
+	"unicode"
 )
 
 //Attributes that may or may not be added to a span based on Options used
 const (
-	TableKey = core.Key("gorm.table") //The table the GORM query is acting upon
-	QueryKey = core.Key("gorm.query") //The GORM query itself
+	TableKey = label.Key("gorm.table") //The table the GORM query is acting upon
+	QueryKey = label.Key("gorm.query") //The GORM query itself
 )
 
 type callbacks struct {
@@ -30,13 +34,13 @@ type callbacks struct {
 	table bool
 
 	//List of default attributes to include onto the span for DB calls
-	defaultAttributes []core.KeyValue
+	defaultAttributes []label.KeyValue
 
 	//tracer creates spans. This is required
 	tracer trace.Tracer
 
 	//List of default options spans will start with
-	spanStartOptions []trace.StartOption
+	spanOptions []trace.SpanOption
 }
 
 //Gorm scope keys for passing around context and span within the DB scope
@@ -59,14 +63,14 @@ func (fn OptionFunc) apply(c *callbacks) {
 
 //WithSpanOptions configures the db callback functions with an additional set of
 //trace.StartOptions which will be applied to each new span
-func WithSpanOptions(opts ...trace.StartOption) OptionFunc {
+func WithSpanOptions(opts ...trace.SpanOption) OptionFunc {
 	return func(c *callbacks) {
-		c.spanStartOptions = opts
+		c.spanOptions = opts
 	}
 }
 
 //WithTracer configures the tracer to use when starting spans. Otherwise
-//the global tarcer is used with a default name
+//the global tracer is used with a default name
 func WithTracer(tracer trace.Tracer) OptionFunc {
 	return func(c *callbacks) {
 		c.tracer = tracer
@@ -95,19 +99,20 @@ func (t Table) apply(c *callbacks) {
 }
 
 // DefaultAttributes sets attributes to each span.
-type DefaultAttributes []core.KeyValue
+type DefaultAttributes []label.KeyValue
 
 func (d DefaultAttributes) apply(c *callbacks) {
-	c.defaultAttributes = []core.KeyValue(d)
+	c.defaultAttributes = []label.KeyValue(d)
 }
 
 // RegisterCallbacks registers the necessary callbacks in Gorm's hook system for instrumentation with OpenTelemetry Spans.
 func RegisterCallbacks(db *gorm.DB, opts ...Option) {
 	c := &callbacks{
-		defaultAttributes: []core.KeyValue{},
+		defaultAttributes: []label.KeyValue{},
 	}
 	defaultOpts := []Option{
-		WithTracer(global.TraceProvider().Tracer("otgorm")),
+		// Default to the global tracer if not configured
+		WithTracer(otel.GetTracerProvider().Tracer("otgorm")),
 		WithSpanOptions(trace.WithSpanKind(trace.SpanKindInternal)),
 	}
 
@@ -123,6 +128,8 @@ func RegisterCallbacks(db *gorm.DB, opts ...Option) {
 	db.Callback().Update().After("gorm:update").Register("after_update", c.afterUpdate)
 	db.Callback().Delete().Before("gorm:delete").Register("before_delete", c.beforeDelete)
 	db.Callback().Delete().After("gorm:delete").Register("after_delete", c.afterDelete)
+	db.Callback().RowQuery().Before("gorm:row_query").Register("before_row_query", c.beforeRowQuery)
+	db.Callback().RowQuery().After("gorm:row_query").Register("after_row_query", c.afterRowQuery)
 }
 
 func (c *callbacks) before(scope *gorm.Scope, operation string) {
@@ -143,7 +150,7 @@ func (c *callbacks) after(scope *gorm.Scope) {
 
 func (c *callbacks) startTrace(ctx context.Context, scope *gorm.Scope, operation string) context.Context {
 	//Start with configured span options
-	opts := append([]trace.StartOption{}, c.spanStartOptions...)
+	opts := append([]trace.SpanOption{}, c.spanOptions...)
 
 	// There's no context but we are ok with root spans
 	if ctx == nil {
@@ -165,7 +172,6 @@ func (c *callbacks) startTrace(ctx context.Context, scope *gorm.Scope, operation
 			opts...,
 		)
 	} else {
-		opts = append(opts, trace.ChildOf(parentSpan.SpanContext()))
 		ctx, span = c.tracer.Start(ctx, fmt.Sprintf("gorm:%s", operation), opts...)
 	}
 
@@ -193,33 +199,123 @@ func (c *callbacks) endTrace(scope *gorm.Scope) {
 	}
 
 	if c.query {
-		attributes = append(attributes, QueryKey.String(scope.SQL))
+		attributes = append(attributes, QueryKey.String(LogFormatter(scope.SQL, scope.SQLVars)))
 	}
+	attributes = append(attributes, label.String("path", fileWithLineNum()))
 	span.SetAttributes(attributes...)
 
 	//Set StatusCode if there are any issues
-	var code codes.Code
+	code := codes.Ok
+	msg := ""
 	if scope.HasError() {
 		err := scope.DB().Error
+		code = codes.Error
 		if gorm.IsRecordNotFoundError(err) {
-			code = codes.NotFound
+			msg = "gorm:NotFound"
 		} else {
-			code = codes.Unknown
+			msg = "gorm:Unknown"
 		}
 
 	}
 
-	span.SetStatus(code)
+	span.SetStatus(code, msg)
 
 	//End Span
 	span.End()
 }
 
-func (c *callbacks) beforeCreate(scope *gorm.Scope) { c.before(scope, "create") }
-func (c *callbacks) afterCreate(scope *gorm.Scope)  { c.after(scope) }
-func (c *callbacks) beforeQuery(scope *gorm.Scope)  { c.before(scope, "query") }
-func (c *callbacks) afterQuery(scope *gorm.Scope)   { c.after(scope) }
-func (c *callbacks) beforeUpdate(scope *gorm.Scope) { c.before(scope, "update") }
-func (c *callbacks) afterUpdate(scope *gorm.Scope)  { c.after(scope) }
-func (c *callbacks) beforeDelete(scope *gorm.Scope) { c.before(scope, "delete") }
-func (c *callbacks) afterDelete(scope *gorm.Scope)  { c.after(scope) }
+func (c *callbacks) beforeCreate(scope *gorm.Scope)   { c.before(scope, "create") }
+func (c *callbacks) afterCreate(scope *gorm.Scope)    { c.after(scope) }
+func (c *callbacks) beforeQuery(scope *gorm.Scope)    { c.before(scope, "query") }
+func (c *callbacks) afterQuery(scope *gorm.Scope)     { c.after(scope) }
+func (c *callbacks) beforeUpdate(scope *gorm.Scope)   { c.before(scope, "update") }
+func (c *callbacks) afterUpdate(scope *gorm.Scope)    { c.after(scope) }
+func (c *callbacks) beforeDelete(scope *gorm.Scope)   { c.before(scope, "delete") }
+func (c *callbacks) afterDelete(scope *gorm.Scope)    { c.after(scope) }
+func (c *callbacks) beforeRowQuery(scope *gorm.Scope) { c.before(scope, "row_query") }
+func (c *callbacks) afterRowQuery(scope *gorm.Scope)  { c.after(scope) }
+
+func fileWithLineNum() string {
+	_, file, line, ok := runtime.Caller(6)
+	if ok {
+		return fmt.Sprintf("%v:%v", file, line)
+	}
+	return ""
+}
+
+var (
+	sqlRegexp                = regexp.MustCompile(`\?`)
+	numericPlaceHolderRegexp = regexp.MustCompile(`\$\d+`)
+	goSrcRegexp              = regexp.MustCompile(`golang/ocgorm(@.*)?/.*.go`)
+	goTestRegexp             = regexp.MustCompile(`jinzhu/gorm(@.*)?/.*test.go`)
+)
+
+func isPrintable(s string) bool {
+	for _, r := range s {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
+}
+
+var LogFormatter = func(values ...interface{}) string {
+	var (
+		sql             string
+		formattedValues []string
+	)
+
+	for _, value := range values[1].([]interface{}) {
+		indirectValue := reflect.Indirect(reflect.ValueOf(value))
+		if indirectValue.IsValid() {
+			value = indirectValue.Interface()
+			if t, ok := value.(time.Time); ok {
+				if t.IsZero() {
+					formattedValues = append(formattedValues, fmt.Sprintf("'%v'", "0000-00-00 00:00:00"))
+				} else {
+					formattedValues = append(formattedValues, fmt.Sprintf("'%v'", t.Format("2006-01-02 15:04:05")))
+				}
+			} else if b, ok := value.([]byte); ok {
+				if str := string(b); isPrintable(str) {
+					formattedValues = append(formattedValues, fmt.Sprintf("'%v'", str))
+				} else {
+					formattedValues = append(formattedValues, "'<binary>'")
+				}
+			} else if r, ok := value.(driver.Valuer); ok {
+				if value, err := r.Value(); err == nil && value != nil {
+					formattedValues = append(formattedValues, fmt.Sprintf("'%v'", value))
+				} else {
+					formattedValues = append(formattedValues, "NULL")
+				}
+			} else {
+				switch value.(type) {
+				case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, bool:
+					formattedValues = append(formattedValues, fmt.Sprintf("%v", value))
+				default:
+					formattedValues = append(formattedValues, fmt.Sprintf("'%v'", value))
+				}
+			}
+		} else {
+			formattedValues = append(formattedValues, "NULL")
+		}
+	}
+
+	// differentiate between $n placeholders or else treat like ?
+	if numericPlaceHolderRegexp.MatchString(values[0].(string)) {
+		sql = values[0].(string)
+		for index, value := range formattedValues {
+			placeholder := fmt.Sprintf(`\$%d([^\d]|$)`, index+1)
+			sql = regexp.MustCompile(placeholder).ReplaceAllString(sql, value+"$1")
+		}
+	} else {
+		formattedValuesLength := len(formattedValues)
+		for index, value := range sqlRegexp.Split(values[0].(string), -1) {
+			sql += value
+			if index < formattedValuesLength {
+				sql += formattedValues[index]
+			}
+		}
+	}
+
+	return sql
+}
