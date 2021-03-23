@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"github.com/jinzhu/gorm"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/label"
 	"go.opentelemetry.io/otel/trace"
 	"reflect"
 	"regexp"
@@ -18,8 +18,8 @@ import (
 
 //Attributes that may or may not be added to a span based on Options used
 const (
-	TableKey = label.Key("gorm.table") //The table the GORM query is acting upon
-	QueryKey = label.Key("gorm.query") //The GORM query itself
+	TableKey = attribute.Key("gorm.table") //The table the GORM query is acting upon
+	QueryKey = attribute.Key("gorm.query") //The GORM query itself
 )
 
 type callbacks struct {
@@ -34,7 +34,7 @@ type callbacks struct {
 	table bool
 
 	//List of default attributes to include onto the span for DB calls
-	defaultAttributes []label.KeyValue
+	defaultAttributes []attribute.KeyValue
 
 	//tracer creates spans. This is required
 	tracer trace.Tracer
@@ -99,16 +99,16 @@ func (t Table) apply(c *callbacks) {
 }
 
 // DefaultAttributes sets attributes to each span.
-type DefaultAttributes []label.KeyValue
+type DefaultAttributes []attribute.KeyValue
 
 func (d DefaultAttributes) apply(c *callbacks) {
-	c.defaultAttributes = []label.KeyValue(d)
+	c.defaultAttributes = []attribute.KeyValue(d)
 }
 
 // RegisterCallbacks registers the necessary callbacks in Gorm's hook system for instrumentation with OpenTelemetry Spans.
 func RegisterCallbacks(db *gorm.DB, opts ...Option) {
 	c := &callbacks{
-		defaultAttributes: []label.KeyValue{},
+		defaultAttributes: []attribute.KeyValue{},
 	}
 	defaultOpts := []Option{
 		// Default to the global tracer if not configured
@@ -201,7 +201,7 @@ func (c *callbacks) endTrace(scope *gorm.Scope) {
 	if c.query {
 		attributes = append(attributes, QueryKey.String(LogFormatter(scope.SQL, scope.SQLVars)))
 	}
-	attributes = append(attributes, label.String("path", fileWithLineNum()))
+	attributes = append(attributes, attribute.String("path", fileWithLineNum()))
 	span.SetAttributes(attributes...)
 
 	//Set StatusCode if there are any issues
