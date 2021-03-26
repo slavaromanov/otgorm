@@ -3,7 +3,7 @@ package otgorm
 import (
 	"context"
 
-	"github.com/jinzhu/gorm"
+	"gorm.io/gorm"
 )
 
 // WithContext sets the current context in the db instance for instrumentation.

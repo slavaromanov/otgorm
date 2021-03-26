@@ -1,9 +1,6 @@
 package otgorm
 
-import (
-	"testing"
-)
+import "testing"
 
 func TestBasics(t *testing.T) {
-
 }

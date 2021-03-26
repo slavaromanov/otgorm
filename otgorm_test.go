@@ -3,14 +3,17 @@ package otgorm_test
 import (
 	"context"
 	"database/sql"
-	"github.com/jinzhu/gorm"
-	"github.com/jjmengze/otgorm"
+	"testing"
+
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"go.opentelemetry.io/otel/oteltest"
 	"go.opentelemetry.io/otel/trace"
 	"gopkg.in/DATA-DOG/go-sqlmock.v1"
-	"testing"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+
+	"github.com/slavaromanov/otgorm"
 )
 
 func TestTrace(t *testing.T) {
@@ -29,27 +32,26 @@ var _ = Describe("Trace", func() {
 	var tp trace.TracerProvider
 	BeforeEach(func() {
 		var err error
-		var tmpDb *sql.DB
-		tmpDb, mock, err = sqlmock.New()
+		var tmpDB *sql.DB
+		tmpDB, mock, err = sqlmock.New()
 		Expect(err).To(BeNil())
 
-		db, err = gorm.Open("postgres", tmpDb)
+		db, err = gorm.Open(postgres.New(postgres.Config{
+			DSN:                  "sqlmock_db_0",
+			DriverName:           "postgres",
+			Conn:                 tmpDB,
+			PreferSimpleProtocol: true,
+		}))
 		Expect(err).To(BeNil())
-
-		db.LogMode(true)
 
 		sr = new(oteltest.SpanRecorder)
 		tp = oteltest.NewTracerProvider(oteltest.WithSpanRecorder(sr))
-		//Register callbacks for GORM, while also passing in config Opts
+		// Register callbacks for GORM, while also passing in config Opts
 		otgorm.RegisterCallbacks(db,
 			otgorm.WithTracer(tp.Tracer("gorm")),
 			otgorm.Query(true),
 			otgorm.AllowRoot(true),
 		)
-	})
-	AfterEach(func() {
-		db.Close()
-		db = nil
 	})
 	Context("With no parent span", func() {
 		ctx := context.Background()
@@ -65,7 +67,8 @@ var _ = Describe("Trace", func() {
 			completed := sr.Completed()
 			Expect(completed).To(HaveLen(1))
 			Expect(completed[0].Name()).To(Equal("gorm:create"))
-			Expect(completed[0].Attributes()["gorm.query"].AsString()).To(Equal(`INSERT INTO "users" DEFAULT VALUES RETURNING "users".*`))
+			Expect(completed[0].Attributes()["gorm.query"].AsString()).
+				To(Equal(`INSERT INTO "users" DEFAULT VALUES`))
 		})
 
 		It("Should record spans for Delete and then Create queries", func() {
@@ -102,7 +105,8 @@ var _ = Describe("Trace", func() {
 		completed := sr.Completed()
 		Expect(completed).To(HaveLen(2))
 		Expect(completed[0].Name()).To(Equal("gorm:create"))
-		Expect(completed[0].Attributes()["gorm.query"].AsString()).To(Equal(`INSERT INTO "users" DEFAULT VALUES RETURNING "users".*`))
+		Expect(completed[0].Attributes()["gorm.query"].AsString()).
+			To(Equal(`INSERT INTO "users" DEFAULT VALUES`))
 		Expect(completed[1].Name()).To(Equal("myTrace"))
 	})
 })
