@@ -5,16 +5,17 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
-	"gorm.io/gorm"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
 	"reflect"
 	"regexp"
 	"runtime"
 	"time"
 	"unicode"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+	"gorm.io/gorm"
 )
 
 // Attributes that may or may not be added to a span based on Options used
@@ -25,7 +26,7 @@ const (
 
 type callbacks struct {
 	// Allow otgorm to create root spans in the absence of a parent span.
-	//Default is to not allow root spans.
+	// Default is to not allow root spans.
 	allowRoot bool
 
 	// Record the DB query as a KeyValue onto the span where the DB is called
@@ -62,16 +63,16 @@ func (fn OptionFunc) apply(c *callbacks) {
 	fn(c)
 }
 
-//WithSpanOptions configures the db callback functions with an additional set of
-//trace.StartOptions which will be applied to each new span
+// WithSpanOptions configures the db callback functions with an additional set of
+// trace.StartOptions which will be applied to each new span
 func WithSpanOptions(opts ...trace.SpanOption) OptionFunc {
 	return func(c *callbacks) {
 		c.spanOptions = opts
 	}
 }
 
-//WithTracer configures the tracer to use when starting spans. Otherwise
-//the global tracer is used with a default name
+//  WithTracer configures the tracer to use when starting spans. Otherwise
+//  the global tracer is used with a default name
 func WithTracer(tracer trace.Tracer) OptionFunc {
 	return func(c *callbacks) {
 		c.tracer = tracer
@@ -92,7 +93,7 @@ func (q Query) apply(c *callbacks) {
 	c.query = bool(q)
 }
 
-//Table allows for recording the table affected by sql queries in spans
+// Table allows for recording the table affected by sql queries in spans
 type Table bool
 
 func (t Table) apply(c *callbacks) {
@@ -134,9 +135,8 @@ func RegisterCallbacks(db *gorm.DB, opts ...Option) {
 }
 
 func (c *callbacks) before(scope *gorm.DB, operation string) {
-	rctx, _ := scope.Get(contextScopeKey)
-	ctx, ok := rctx.(context.Context)
-	if !ok || ctx == nil {
+	ctx := scope.Statement.Context
+	if ctx == nil {
 		ctx = context.Background()
 	}
 
@@ -150,7 +150,7 @@ func (c *callbacks) after(scope *gorm.DB) {
 }
 
 func (c *callbacks) startTrace(ctx context.Context, scope *gorm.DB, operation string) context.Context {
-	//Start with configured span options
+	// Start with configured span options
 	opts := append([]trace.SpanOption{}, c.spanOptions...)
 
 	// There's no context but we are ok with root spans
@@ -158,7 +158,7 @@ func (c *callbacks) startTrace(ctx context.Context, scope *gorm.DB, operation st
 		ctx = context.Background()
 	}
 
-	//If there's no parent span and we don't allow root spans, return context
+	// If there's no parent span and we don't allow root spans, return context
 	parentSpan := trace.SpanFromContext(ctx)
 	if parentSpan == nil && !c.allowRoot {
 		return ctx
@@ -205,17 +205,17 @@ func (c *callbacks) endTrace(scope *gorm.DB) {
 	attributes = append(attributes, attribute.String("path", fileWithLineNum()))
 	span.SetAttributes(attributes...)
 
-	//Set StatusCode if there are any issues
+	// Set StatusCode if there are any issues
 	code := codes.Ok
 	msg := ""
-		if err := scope.Error; err != nil {
-			code = codes.Error
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				msg = "gorm:NotFound"
-			} else {
-				msg = "gorm:Unknown"
-			}
+	if err := scope.Error; err != nil {
+		code = codes.Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			msg = "gorm:NotFound"
+		} else {
+			msg = "gorm:Unknown"
 		}
+	}
 
 	span.SetStatus(code, msg)
 
