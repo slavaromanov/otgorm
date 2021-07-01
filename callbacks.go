@@ -42,7 +42,7 @@ type callbacks struct {
 	tracer trace.Tracer
 
 	// List of default options spans will start with
-	spanOptions []trace.SpanOption
+	spanOptions []trace.SpanStartOption
 }
 
 // Gorm scope keys for passing around context and span within the DB scope
@@ -65,7 +65,7 @@ func (fn OptionFunc) apply(c *callbacks) {
 
 // WithSpanOptions configures the db callback functions with an additional set of
 // trace.StartOptions which will be applied to each new span
-func WithSpanOptions(opts ...trace.SpanOption) OptionFunc {
+func WithSpanOptions(opts ...trace.SpanStartOption) OptionFunc {
 	return func(c *callbacks) {
 		c.spanOptions = opts
 	}
@@ -151,7 +151,7 @@ func (c *callbacks) after(scope *gorm.DB) {
 
 func (c *callbacks) startTrace(ctx context.Context, scope *gorm.DB, operation string) context.Context {
 	// Start with configured span options
-	opts := append([]trace.SpanOption{}, c.spanOptions...)
+	opts := append([]trace.SpanStartOption{}, c.spanOptions...)
 
 	// There's no context but we are ok with root spans
 	if ctx == nil {
